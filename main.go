@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"strings"
 )
 
 /**
@@ -33,7 +34,7 @@ func main() {
 		scanner.Scan()
 		fmt.Sscan(scanner.Text(), &visiblePacCount)
 
-		var myPac Pac
+		var pacs = make([]Pac, 0, visiblePacCount)
 
 		for i := 0; i < visiblePacCount; i++ {
 			// pacId: pac number (unique within a team)
@@ -53,9 +54,7 @@ func main() {
 			fmt.Sscan(scanner.Text(), &pacId, &_mine, &x, &y, &typeId, &speedTurnsLeft, &abilityCooldown)
 			mine = _mine != 0
 
-			if mine {
-				myPac = Pac{pacId, mine, x, y, typeId, speedTurnsLeft, abilityCooldown}
-			}
+			pacs = append(pacs, Pac{pacId, mine, x, y, typeId, speedTurnsLeft, abilityCooldown})
 		}
 		// visiblePelletCount: all pellets in sight
 		var visiblePelletCount int
@@ -76,23 +75,50 @@ func main() {
 		// fmt.Fprintln(os.Stderr, "Debug messages...")
 		// fmt.Println("MOVE 0 15 10") // MOVE <pacId> <x> <y>
 
-		var nextPellet = getNextPellet(myPac, pellets)
-
-		fmt.Printf("MOVE %v %v %v\n", myPac.pacID, nextPellet.x, nextPellet.y)
+		var commands = make([]string, 0, visiblePacCount)
+		for _, pac := range pacs {
+			if pac.mine {
+				nextPellet := getNextPellet(pac, pellets, pacs)
+				commands = append(commands, fmt.Sprintf("MOVE %v %v %v", pac.pacID, nextPellet.x, nextPellet.y))
+			}
+		}
+		fmt.Println(strings.Join(commands, "|"))
 	}
 }
 
-func getNextPellet(myPac Pac, pellets []Pellet) Pellet {
-	var bestDistance = 9999999
-	var bestPellet = Pellet{99999, 99999, 0}
+func getNextPellet(pac Pac, pellets []Pellet, pacs []Pac) Pellet {
+	bestDistance := 9999999
+	bestSafeDistance := 9999999
+	bestPellet := Pellet{99999, 99999, 0}
+	bestSafePellet := Pellet{99999, 99999, 0}
+	foundSafePellet := false
 
-	for _, p := range pellets {
-		var distance = Abs(myPac.x-p.x) + Abs(myPac.y-p.y)
+	for _, pellet := range pellets {
+		worstDanger := 999999
+		for _, other := range pacs {
+			danger := PacPelletDistance(other, pellet)
+
+			if !Match(other, pac) && danger < worstDanger {
+				worstDanger = danger
+			}
+		}
+
+		var distance = PacPelletDistance(pac, pellet)
 
 		if distance < bestDistance {
 			bestDistance = distance
-			bestPellet = p
+			bestPellet = pellet
 		}
+
+		if distance < bestSafeDistance && distance < worstDanger {
+			foundSafePellet = true
+			bestSafeDistance = distance
+			bestSafePellet = pellet
+		}
+	}
+
+	if foundSafePellet {
+		return bestSafePellet
 	}
 
 	return bestPellet
@@ -112,10 +138,26 @@ type Pellet struct {
 	value int
 }
 
+func PacPelletDistance(pac Pac, pellet Pellet) int {
+	return Distance(pac.x, pac.y, pellet.x, pellet.y)
+}
+
+func PacPacDistance(pac1 Pac, pac2 Pac) int {
+	return Distance(pac1.x, pac1.y, pac2.x, pac2.y)
+}
+
+func Distance(x1 int, y1 int, x2 int, y2 int) int {
+	return Abs(x1-x2) + Abs(y1-y2)
+}
+
 func Abs(x int) int {
 	if x < 0 {
 		return -1 * x
 	}
 
 	return x
+}
+
+func Match(pac1 Pac, pac2 Pac) bool {
+	return pac1.mine == pac2.mine && pac1.pacID == pac2.pacID
 }
