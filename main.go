@@ -7,9 +7,216 @@ import (
 	"strings"
 )
 
+var compass = map[rune]point{
+	'N': point{0, -1},
+	'E': point{1, 0},
+	'S': point{0, 1},
+	'W': point{-1, 0},
+}
+
+type wall struct{}
+
+type floor struct{}
+
+type point struct {
+	x, y int
+}
+
+func (p point) add(other point) point {
+	return point{p.x + other.x, p.y + other.y}
+}
+
+type pac struct {
+	pacID                           int
+	mine                            bool
+	typeID                          string
+	speedTurnsLeft, abilityCooldown int
+	position                        point
+	lastUpdated                     int
+}
+
+type pellet struct {
+	value       int
+	lastUpdated int
+}
+
+type valueCluster struct {
+	position point
+	value    int
+	size     int
+	children []*valueCluster
+	parent   *valueCluster
+}
+
+func (v *valueCluster) addValue(value int) {
+	v.value += value
+	if v.parent != nil {
+		v.parent.addValue(value)
+	}
+}
+
+func (v *valueCluster) addChildClusters(baseValues map[point]valueCluster) {
+	if v.size == 1 {
+		return
+	}
+
+	quadrants := make([]map[point]valueCluster, 0, 4)
+
+	for i := 0; i < 4; i++ {
+		quadrants = append(quadrants, make(map[point]valueCluster))
+	}
+
+	centre := v.position
+
+	for position, value := range baseValues {
+		var quadrant int
+
+		if position.x <= centre.x && position.y <= centre.y {
+			quadrant = 0
+		} else if position.x <= centre.x && position.y > centre.y {
+			quadrant = 1
+		} else if position.x > centre.x && position.y <= centre.y {
+			quadrant = 2
+		} else {
+			quadrant = 3
+		}
+
+		quadrants[quadrant][position] = value
+	}
+
+	for _, quadrant := range quadrants {
+		if len(quadrant) == 0 {
+			continue
+		}
+
+		child := valueCluster{getCentre(quadrant), 0, len(quadrant), make([]*valueCluster, 0, 4), v}
+		v.children = append(v.children, &child)
+		child.addChildClusters(quadrant)
+	}
+}
+
+type gameMap struct {
+	currentTurn   int
+	width, height int
+	myPacs        map[int]pac
+	enemyPacs     map[int]pac
+	superPellets  map[point]pellet
+	grid          map[point]interface{}
+	valueGrid     map[point]valueCluster
+	topCluster    valueCluster
+}
+
+func (m *gameMap) add(position point, obj interface{}) {
+	switch obj.(type) {
+	case pac:
+		newPac := obj.(pac)
+		pacID := newPac.pacID
+		var oldPac pac
+		if newPac.mine {
+			oldPac = m.myPacs[pacID]
+			m.myPacs[pacID] = newPac
+		} else {
+			oldPac = m.enemyPacs[pacID]
+			m.enemyPacs[pacID] = newPac
+		}
+		m.grid[oldPac.position] = floor{}
+		m.grid[position] = newPac
+	case pellet:
+		newPellet := obj.(pellet)
+		if newPellet.value == 10 {
+			m.superPellets[position] = newPellet
+		}
+		m.grid[position] = newPellet
+	default:
+		m.grid[position] = obj
+	}
+}
+
+func (m *gameMap) update() {
+	for _, pac := range m.myPacs {
+		for _, direction := range compass {
+			m._updateViewLine(pac.position, direction)
+		}
+	}
+
+	for position, superPellet := range m.superPellets {
+		if superPellet.lastUpdated != m.currentTurn {
+			delete(m.superPellets, position)
+			m.grid[position] = floor{}
+		}
+	}
+
+	for point, obj := range m.grid {
+		valueCluster := m.valueGrid[point]
+		valueCluster.addValue(m.getObjValue(obj) - valueCluster.value)
+	}
+}
+
+func (m *gameMap) _updateViewLine(origin point, direction point) {
+	current := point{origin.x, origin.y}
+
+	for {
+		current = current.add(direction)
+
+		switch obj := m.grid[current]; obj.(type) {
+		case pellet:
+			if obj.(pellet).lastUpdated != m.currentTurn {
+				m.grid[current] = floor{}
+			}
+		case wall:
+			return
+		}
+	}
+}
+
+func (m *gameMap) getObjValue(obj interface{}) int {
+	switch obj.(type) {
+	case pac:
+		pac := obj.(pac)
+		age := m.currentTurn - pac.lastUpdated + 1
+		if pac.mine {
+			return -5 / age
+		}
+		return -10 / age
+	case pellet:
+		pellet := obj.(pellet)
+		age := m.currentTurn - pellet.lastUpdated + 1
+		return pellet.value / age
+	default:
+		return 0
+	}
+}
+
 /**
  * Grab the pellets as fast as you can!
  **/
+
+func makeGameMap(width int, height int) gameMap {
+	valueMap := make(map[point]valueCluster)
+	for x := 0; x < width; x++ {
+		for y := 0; y < width; y++ {
+			position := point{x, y}
+			valueMap[position] = valueCluster{position, 0, 1, []*valueCluster{}, nil}
+		}
+	}
+
+	topCluster := valueCluster{getCentre(valueMap), 0, len(valueMap), make([]*valueCluster, 0, 4), nil}
+	topCluster.addChildClusters(valueMap)
+
+	return gameMap{0, width, height, make(map[int]pac), make(map[int]pac), make(map[point]pellet), make(map[point]interface{}), valueMap, topCluster}
+}
+
+func getCentre(points map[point]valueCluster) point {
+	sumX := 0
+	sumY := 0
+
+	for position := range points {
+		sumX += position.x
+		sumY += position.y
+	}
+
+	return point{sumX / len(points), sumY / len(points)}
+}
 
 func main() {
 	scanner := bufio.NewScanner(os.Stdin)
@@ -21,136 +228,111 @@ func main() {
 	scanner.Scan()
 	fmt.Sscan(scanner.Text(), &width, &height)
 
+	var gameMap = makeGameMap(width, height)
+
 	for i := 0; i < height; i++ {
 		scanner.Scan()
-		//row := scanner.Text() // one line of the grid: space " " is floor, pound "#" is wall
+		row := scanner.Text() // one line of the grid: space " " is floor, pound "#" is wall
+		for j, char := range row {
+			point := point{j, i}
+
+			switch char {
+			case ' ':
+				gameMap.add(point, pellet{1, 0})
+			case '#':
+				gameMap.add(point, wall{})
+			}
+		}
 	}
+
 	for {
+		gameMap.currentTurn++
+
 		var myScore, opponentScore int
 		scanner.Scan()
 		fmt.Sscan(scanner.Text(), &myScore, &opponentScore)
-		// visiblePacCount: all your pacs and enemy pacs in sight
+
 		var visiblePacCount int
 		scanner.Scan()
 		fmt.Sscan(scanner.Text(), &visiblePacCount)
 
-		var pacs = make([]Pac, 0, visiblePacCount)
-
 		for i := 0; i < visiblePacCount; i++ {
-			// pacId: pac number (unique within a team)
-			// mine: true if this pac is yours
-			// x: position in the grid
-			// y: position in the grid
-			// typeId: unused in wood leagues
-			// speedTurnsLeft: unused in wood leagues
-			// abilityCooldown: unused in wood leagues
-			var pacId int
-			var mine bool
+			var pacID int
 			var _mine int
 			var x, y int
-			var typeId string
+			var typeID string
 			var speedTurnsLeft, abilityCooldown int
 			scanner.Scan()
-			fmt.Sscan(scanner.Text(), &pacId, &_mine, &x, &y, &typeId, &speedTurnsLeft, &abilityCooldown)
-			mine = _mine != 0
+			fmt.Sscan(scanner.Text(), &pacID, &_mine, &x, &y, &typeID, &speedTurnsLeft, &abilityCooldown)
 
-			pacs = append(pacs, Pac{pacId, mine, x, y, typeId, speedTurnsLeft, abilityCooldown})
+			mine := _mine != 0
+			position := point{x, y}
+			newPac := pac{pacID, mine, typeID, speedTurnsLeft, abilityCooldown, position, gameMap.currentTurn}
+
+			gameMap.add(position, newPac)
 		}
-		// visiblePelletCount: all pellets in sight
+
 		var visiblePelletCount int
 		scanner.Scan()
 		fmt.Sscan(scanner.Text(), &visiblePelletCount)
 
-		var pellets = make([]Pellet, 0, visiblePelletCount)
-
 		for i := 0; i < visiblePelletCount; i++ {
-			// value: amount of points this pellet is worth
 			var x, y, value int
 			scanner.Scan()
 			fmt.Sscan(scanner.Text(), &x, &y, &value)
 
-			pellets = append(pellets, Pellet{x, y, value})
+			gameMap.add(point{x, y}, pellet{value, gameMap.currentTurn})
 		}
 
-		// fmt.Fprintln(os.Stderr, "Debug messages...")
-		// fmt.Println("MOVE 0 15 10") // MOVE <pacId> <x> <y>
+		gameMap.update()
 
 		var commands = make([]string, 0, visiblePacCount)
-		for _, pac := range pacs {
-			if pac.mine {
-				nextPellet := getNextPellet(pac, pellets, pacs)
-				commands = append(commands, fmt.Sprintf("MOVE %v %v %v", pac.pacID, nextPellet.x, nextPellet.y))
-			}
+		for _, pac := range gameMap.myPacs {
+			commands = append(commands, chooseAction(pac, gameMap))
 		}
 		fmt.Println(strings.Join(commands, "|"))
 	}
 }
 
-func getNextPellet(pac Pac, pellets []Pellet, pacs []Pac) Pellet {
-	bestDistance := 9999999
-	bestSafeDistance := 9999999
-	bestPellet := Pellet{99999, 99999, 0}
-	bestSafePellet := Pellet{99999, 99999, 0}
-	foundSafePellet := false
+func chooseAction(pac pac, gameMap gameMap) string {
+	// sprint if possible
+	if pac.abilityCooldown <= 1 {
+		return fmt.Sprintf("SPEED %v", pac.pacID)
+	}
 
-	for _, pellet := range pellets {
-		worstDanger := 999999
-		for _, other := range pacs {
-			danger := PacPelletDistance(other, pellet)
+	// if you see an enemy pac and you can eat it, give chase
 
-			if !Match(other, pac) && danger < worstDanger {
-				worstDanger = danger
+	// if you see an enemy pac and you can change to eat it, change
+
+	// if you see an enemy pac and you can't eat it or change, run away
+
+	// run towards the highest value space
+	nextTarget := getNextTarget(pac, gameMap)
+	return fmt.Sprintf("MOVE %v %v %v", pac.pacID, nextTarget.x, nextTarget.y)
+}
+
+func getNextTarget(pac pac, gameMap gameMap) point {
+	bestCluster := gameMap.topCluster
+
+	for len(bestCluster.children) != 0 {
+		bestValue := 0
+		for _, childCluster := range bestCluster.children {
+			value := childCluster.value / distance(pac.position, childCluster.position)
+			if value >= bestValue {
+				bestValue = value
+				bestCluster = *childCluster
 			}
 		}
-
-		var distance = PacPelletDistance(pac, pellet)
-
-		if distance < bestDistance {
-			bestDistance = distance
-			bestPellet = pellet
-		}
-
-		if distance < bestSafeDistance && distance < worstDanger {
-			foundSafePellet = true
-			bestSafeDistance = distance
-			bestSafePellet = pellet
-		}
 	}
 
-	if foundSafePellet {
-		return bestSafePellet
-	}
-
-	return bestPellet
+	return bestCluster.position
 }
 
-type Pac struct {
-	pacID                           int
-	mine                            bool
-	x, y                            int
-	typeId                          string
-	speedTurnsLeft, abilityCooldown int
+func distance(p1 point, p2 point) int {
+	return abs(p1.x-p2.x) + abs(p1.y-p2.y)
 }
 
-type Pellet struct {
-	x     int
-	y     int
-	value int
-}
-
-func PacPelletDistance(pac Pac, pellet Pellet) int {
-	return Distance(pac.x, pac.y, pellet.x, pellet.y)
-}
-
-func PacPacDistance(pac1 Pac, pac2 Pac) int {
-	return Distance(pac1.x, pac1.y, pac2.x, pac2.y)
-}
-
-func Distance(x1 int, y1 int, x2 int, y2 int) int {
-	return Abs(x1-x2) + Abs(y1-y2)
-}
-
-func Abs(x int) int {
+func abs(x int) int {
 	if x < 0 {
 		return -1 * x
 	}
@@ -158,6 +340,6 @@ func Abs(x int) int {
 	return x
 }
 
-func Match(pac1 Pac, pac2 Pac) bool {
+func match(pac1 pac, pac2 pac) bool {
 	return pac1.mine == pac2.mine && pac1.pacID == pac2.pacID
 }
