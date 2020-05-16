@@ -8,6 +8,9 @@ import (
 	"time"
 )
 
+const myPacValue = -5
+const enemyPacValue = -5
+
 var compass = map[rune]point{
 	'N': point{0, -1},
 	'E': point{1, 0},
@@ -219,7 +222,7 @@ func (m *gameMap) _updateViewLine(origin point, direction point) {
 	for {
 		current = current.add(direction, m.width, m.height)
 
-		fmt.Fprintln(os.Stderr, fmt.Sprintf("checking %v, found %t", current, m.grid[current]))
+		//fmt.Fprintln(os.Stderr, fmt.Sprintf("checking %v, found %t", current, m.grid[current]))
 
 		switch obj := m.grid[current]; obj.(type) {
 		case pellet:
@@ -238,9 +241,9 @@ func (m *gameMap) getObjValue(obj interface{}) int {
 		pac := obj.(pac)
 		//age := m.currentTurn - pac.lastUpdated + 1
 		if pac.mine {
-			return -1 // / age
+			return myPacValue // / age
 		}
-		return -2 // / age
+		return enemyPacValue // / age
 	case pellet:
 		pellet := obj.(pellet)
 		//age := m.currentTurn - pellet.lastUpdated + 1
@@ -378,14 +381,15 @@ func chooseAction(pac pac, gameMap gameMap) string {
 func getNextTarget(pac pac, gameMap gameMap) point {
 	bestCluster := gameMap.topCluster
 
-	fmt.Fprintln(os.Stderr, fmt.Sprintf("best cluster: position = %v, value = %v, size = %v", bestCluster.position, bestCluster.value, bestCluster.size))
+	// temporarily remove this pac so it won't run away from itself
+	gameMap.valueGrid[pac.position].addValue(-myPacValue)
+
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("pacID = %v, position = %v", pac.pacID, pac.position))
 
 	for len(bestCluster.children) != 0 {
 		bestValue := float64(0)
 
 		for _, childCluster := range bestCluster.children {
-			fmt.Fprintln(os.Stderr, fmt.Sprintf("considering: position = %v, value = %v, size = %v", childCluster.position, childCluster.value, childCluster.size))
-
 			value := float64(childCluster.value)
 			distance := float64(distance(pac.position, childCluster.position))
 
@@ -395,6 +399,11 @@ func getNextTarget(pac pac, gameMap gameMap) point {
 				value /= distance
 			}
 
+			if pac.pacID == 0 {
+				fmt.Fprintln(os.Stderr, fmt.Sprintf("considering: position = %v, value = %v, size = %v, distance = %v, calcValue = %v",
+					childCluster.position, childCluster.value, childCluster.size, distance, value))
+			}
+
 			if value >= bestValue {
 				bestValue = value
 				bestCluster = *childCluster
@@ -402,6 +411,9 @@ func getNextTarget(pac pac, gameMap gameMap) point {
 		}
 		fmt.Fprintln(os.Stderr, fmt.Sprintf("best cluster: position = %v, value = %v, size = %v", bestCluster.position, bestCluster.value, bestCluster.size))
 	}
+
+	// put the pac back in the grid
+	gameMap.valueGrid[pac.position].addValue(myPacValue)
 
 	return bestCluster.position
 }
