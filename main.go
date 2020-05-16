@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 var compass = map[rune]point{
@@ -22,8 +23,11 @@ type point struct {
 	x, y int
 }
 
-func (p point) add(other point) point {
-	return point{p.x + other.x, p.y + other.y}
+func (p point) add(other point, width int, height int) point {
+	return point{
+		mod(p.x+other.x, width),
+		mod(p.y+other.y, height),
+	}
 }
 
 type pac struct {
@@ -49,11 +53,11 @@ type valueCluster struct {
 }
 
 func (v *valueCluster) addValue(value int) {
-	if v.parent == nil {
-		fmt.Fprintln(os.Stderr, fmt.Sprintf("adding %v to %v with parent nil and size %v", value, v.position, v.size))
-	} else {
-		fmt.Fprintln(os.Stderr, fmt.Sprintf("adding %v to %v with parent %v and size %v", value, v.position, v.parent.value, v.size))
-	}
+	// if v.parent == nil {
+	// 	fmt.Fprintln(os.Stderr, fmt.Sprintf("adding %v to %v with parent nil and size %v", value, v.position, v.size))
+	// } else {
+	// 	fmt.Fprintln(os.Stderr, fmt.Sprintf("adding %v to %v with parent %v and size %v", value, v.position, v.parent.value, v.size))
+	// }
 	v.value += value
 	if v.parent != nil {
 		v.parent.addValue(value)
@@ -168,11 +172,17 @@ func (m *gameMap) add(position point, obj interface{}) {
 }
 
 func (m *gameMap) update() {
+	start := time.Now()
+
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updating view lines", time.Since(start)))
+
 	for _, pac := range m.myPacs {
 		for _, direction := range compass {
 			m._updateViewLine(pac.position, direction)
 		}
 	}
+
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updating super pellets", time.Since(start)))
 
 	for position, superPellet := range m.superPellets {
 		if superPellet.lastUpdated != m.currentTurn {
@@ -181,6 +191,17 @@ func (m *gameMap) update() {
 		}
 	}
 
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updating pacs", time.Since(start)))
+
+	for _, pac := range m.myPacs {
+		if pac.lastUpdated != m.currentTurn {
+			delete(m.myPacs, pac.pacID)
+			m.add(pac.position, floor{})
+		}
+	}
+
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updating values", time.Since(start)))
+
 	for point, obj := range m.grid {
 		valueCluster := m.valueGrid[point]
 		difference := m.getObjValue(obj) - valueCluster.value
@@ -188,13 +209,17 @@ func (m *gameMap) update() {
 			valueCluster.addValue(difference)
 		}
 	}
+
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updated values", time.Since(start)))
 }
 
 func (m *gameMap) _updateViewLine(origin point, direction point) {
 	current := point{origin.x, origin.y}
 
 	for {
-		current = current.add(direction)
+		current = current.add(direction, m.width, m.height)
+
+		fmt.Fprintln(os.Stderr, fmt.Sprintf("checking %v, found %t", current, m.grid[current]))
 
 		switch obj := m.grid[current]; obj.(type) {
 		case pellet:
@@ -211,15 +236,15 @@ func (m *gameMap) getObjValue(obj interface{}) int {
 	switch obj.(type) {
 	case pac:
 		pac := obj.(pac)
-		age := m.currentTurn - pac.lastUpdated + 1
+		//age := m.currentTurn - pac.lastUpdated + 1
 		if pac.mine {
-			return -5 / age
+			return -1 // / age
 		}
-		return -10 / age
+		return -2 // / age
 	case pellet:
 		pellet := obj.(pellet)
-		age := m.currentTurn - pellet.lastUpdated + 1
-		return pellet.value / age
+		//age := m.currentTurn - pellet.lastUpdated + 1
+		return pellet.value /// age
 	default:
 		return 0
 	}
@@ -242,6 +267,8 @@ func getCentre(points map[point]*valueCluster) point {
 }
 
 func main() {
+	start := time.Now()
+
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 1000000), 1000000)
 
@@ -251,7 +278,11 @@ func main() {
 	scanner.Scan()
 	fmt.Sscan(scanner.Text(), &width, &height)
 
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: making game map", time.Since(start)))
+
 	var gameMap = makeGameMap(width, height)
+
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: populating game map", time.Since(start)))
 
 	for i := 0; i < height; i++ {
 		scanner.Scan()
@@ -268,6 +299,8 @@ func main() {
 		}
 	}
 
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: starting game", time.Since(start)))
+
 	for {
 		gameMap.currentTurn++
 
@@ -278,6 +311,8 @@ func main() {
 		var visiblePacCount int
 		scanner.Scan()
 		fmt.Sscan(scanner.Text(), &visiblePacCount)
+
+		fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updating pacs", time.Since(start)))
 
 		for i := 0; i < visiblePacCount; i++ {
 			var pacID int
@@ -295,6 +330,8 @@ func main() {
 			gameMap.add(position, newPac)
 		}
 
+		fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updating pellets", time.Since(start)))
+
 		var visiblePelletCount int
 		scanner.Scan()
 		fmt.Sscan(scanner.Text(), &visiblePelletCount)
@@ -307,7 +344,11 @@ func main() {
 			gameMap.add(point{x, y}, pellet{value, gameMap.currentTurn})
 		}
 
+		fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updating game map", time.Since(start)))
+
 		gameMap.update()
+
+		fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: making commands", time.Since(start)))
 
 		var commands = make([]string, 0, visiblePacCount)
 		for _, pac := range gameMap.myPacs {
@@ -340,11 +381,13 @@ func getNextTarget(pac pac, gameMap gameMap) point {
 	fmt.Fprintln(os.Stderr, fmt.Sprintf("best cluster: position = %v, value = %v, size = %v", bestCluster.position, bestCluster.value, bestCluster.size))
 
 	for len(bestCluster.children) != 0 {
-		bestValue := 0
+		bestValue := float64(0)
+
 		for _, childCluster := range bestCluster.children {
 			fmt.Fprintln(os.Stderr, fmt.Sprintf("considering: position = %v, value = %v, size = %v", childCluster.position, childCluster.value, childCluster.size))
-			distance := distance(pac.position, childCluster.position)
-			value := childCluster.value
+
+			value := float64(childCluster.value)
+			distance := float64(distance(pac.position, childCluster.position))
 
 			if distance == 0 && childCluster.size == 1 {
 				value = 0
@@ -373,6 +416,14 @@ func abs(x int) int {
 	}
 
 	return x
+}
+
+func mod(x int, y int) int {
+	val := x % y
+	for val < 0 {
+		val += y
+	}
+	return val
 }
 
 func match(pac1 pac, pac2 pac) bool {
