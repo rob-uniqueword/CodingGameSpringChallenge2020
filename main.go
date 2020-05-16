@@ -49,21 +49,26 @@ type valueCluster struct {
 }
 
 func (v *valueCluster) addValue(value int) {
+	if v.parent == nil {
+		fmt.Fprintln(os.Stderr, fmt.Sprintf("adding %v to %v with parent nil and size %v", value, v.position, v.size))
+	} else {
+		fmt.Fprintln(os.Stderr, fmt.Sprintf("adding %v to %v with parent %v and size %v", value, v.position, v.parent.value, v.size))
+	}
 	v.value += value
 	if v.parent != nil {
 		v.parent.addValue(value)
 	}
 }
 
-func (v *valueCluster) addChildClusters(baseValues map[point]valueCluster) {
+func (v *valueCluster) addChildClusters(baseValues map[point]*valueCluster) {
 	if v.size == 1 {
 		return
 	}
 
-	quadrants := make([]map[point]valueCluster, 0, 4)
+	quadrants := make([]map[point]*valueCluster, 0, 4)
 
 	for i := 0; i < 4; i++ {
-		quadrants = append(quadrants, make(map[point]valueCluster))
+		quadrants = append(quadrants, make(map[point]*valueCluster))
 	}
 
 	centre := v.position
@@ -89,10 +94,40 @@ func (v *valueCluster) addChildClusters(baseValues map[point]valueCluster) {
 			continue
 		}
 
-		child := valueCluster{getCentre(quadrant), 0, len(quadrant), make([]*valueCluster, 0, 4), v}
-		v.children = append(v.children, &child)
+		var child *valueCluster
+
+		if len(quadrant) == 1 {
+			for _, cluster := range quadrant {
+				child = cluster
+				child.parent = v
+			}
+		} else {
+			child = &valueCluster{getCentre(quadrant), 0, len(quadrant), make([]*valueCluster, 0, 4), v}
+		}
+
+		v.children = append(v.children, child)
 		child.addChildClusters(quadrant)
 	}
+}
+
+func makeGameMap(width int, height int) gameMap {
+	valueMap := make(map[point]*valueCluster)
+	for x := 0; x < width; x++ {
+		for y := 0; y < height; y++ {
+			position := point{x, y}
+			valueMap[position] = &valueCluster{position, 0, 1, nil, nil}
+		}
+	}
+
+	topCluster := valueCluster{getCentre(valueMap), 0, len(valueMap), make([]*valueCluster, 0, 4), nil}
+	topCluster.addChildClusters(valueMap)
+
+	//fmt.Fprintln(os.Stderr, fmt.Sprintf("child clusters: %v", topCluster.children))
+	//for _, cluster := range topCluster.children {
+	//	fmt.Fprintln(os.Stderr, fmt.Sprintf("pointer:%v, parent:%v", cluster, *cluster.parent))
+	//}
+
+	return gameMap{0, width, height, make(map[int]pac), make(map[int]pac), make(map[point]pellet), make(map[point]interface{}), valueMap, topCluster}
 }
 
 type gameMap struct {
@@ -102,7 +137,7 @@ type gameMap struct {
 	enemyPacs     map[int]pac
 	superPellets  map[point]pellet
 	grid          map[point]interface{}
-	valueGrid     map[point]valueCluster
+	valueGrid     map[point]*valueCluster
 	topCluster    valueCluster
 }
 
@@ -148,7 +183,10 @@ func (m *gameMap) update() {
 
 	for point, obj := range m.grid {
 		valueCluster := m.valueGrid[point]
-		valueCluster.addValue(m.getObjValue(obj) - valueCluster.value)
+		difference := m.getObjValue(obj) - valueCluster.value
+		if difference != 0 {
+			valueCluster.addValue(difference)
+		}
 	}
 }
 
@@ -191,22 +229,7 @@ func (m *gameMap) getObjValue(obj interface{}) int {
  * Grab the pellets as fast as you can!
  **/
 
-func makeGameMap(width int, height int) gameMap {
-	valueMap := make(map[point]valueCluster)
-	for x := 0; x < width; x++ {
-		for y := 0; y < width; y++ {
-			position := point{x, y}
-			valueMap[position] = valueCluster{position, 0, 1, []*valueCluster{}, nil}
-		}
-	}
-
-	topCluster := valueCluster{getCentre(valueMap), 0, len(valueMap), make([]*valueCluster, 0, 4), nil}
-	topCluster.addChildClusters(valueMap)
-
-	return gameMap{0, width, height, make(map[int]pac), make(map[int]pac), make(map[point]pellet), make(map[point]interface{}), valueMap, topCluster}
-}
-
-func getCentre(points map[point]valueCluster) point {
+func getCentre(points map[point]*valueCluster) point {
 	sumX := 0
 	sumY := 0
 
@@ -314,15 +337,27 @@ func chooseAction(pac pac, gameMap gameMap) string {
 func getNextTarget(pac pac, gameMap gameMap) point {
 	bestCluster := gameMap.topCluster
 
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("best cluster: position = %v, value = %v, size = %v", bestCluster.position, bestCluster.value, bestCluster.size))
+
 	for len(bestCluster.children) != 0 {
 		bestValue := 0
 		for _, childCluster := range bestCluster.children {
-			value := childCluster.value / distance(pac.position, childCluster.position)
+			fmt.Fprintln(os.Stderr, fmt.Sprintf("considering: position = %v, value = %v, size = %v", childCluster.position, childCluster.value, childCluster.size))
+			distance := distance(pac.position, childCluster.position)
+			value := childCluster.value
+
+			if distance == 0 && childCluster.size == 1 {
+				value = 0
+			} else if distance != 0 {
+				value /= distance
+			}
+
 			if value >= bestValue {
 				bestValue = value
 				bestCluster = *childCluster
 			}
 		}
+		fmt.Fprintln(os.Stderr, fmt.Sprintf("best cluster: position = %v, value = %v, size = %v", bestCluster.position, bestCluster.value, bestCluster.size))
 	}
 
 	return bestCluster.position
