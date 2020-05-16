@@ -177,11 +177,21 @@ func (m *gameMap) add(position point, obj interface{}) {
 func (m *gameMap) update() {
 	start := time.Now()
 
-	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updating view lines", time.Since(start)))
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updating visible pelets", time.Since(start)))
 
+	visiblePoints := make(map[point]bool)
 	for _, pac := range m.myPacs {
-		for _, direction := range compass {
-			m._updateViewLine(pac.position, direction)
+		for _, point := range m.getVisiblePoints(pac.position, max(m.height, m.width)) {
+			visiblePoints[point] = true
+		}
+	}
+
+	for point := range visiblePoints {
+		switch obj := m.grid[point]; obj.(type) {
+		case pellet:
+			if obj.(pellet).lastUpdated != m.currentTurn {
+				m.add(point, floor{})
+			}
 		}
 	}
 
@@ -190,7 +200,7 @@ func (m *gameMap) update() {
 	for position, superPellet := range m.superPellets {
 		if superPellet.lastUpdated != m.currentTurn {
 			delete(m.superPellets, position)
-			m.grid[position] = floor{}
+			m.add(position, floor{})
 		}
 	}
 
@@ -216,23 +226,74 @@ func (m *gameMap) update() {
 	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updated values", time.Since(start)))
 }
 
-func (m *gameMap) _updateViewLine(origin point, direction point) {
-	current := point{origin.x, origin.y}
+func (m *gameMap) pathDistance(origin point, target point) int {
+	if origin == target {
+		return 0
+	}
 
-	for {
-		current = current.add(direction, m.width, m.height)
+	printDebug := false
+	point1 := point{21, 7}
+	point2 := point{22, 9}
+	if origin == point1 && target == point2 {
+		printDebug = true
+	}
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("calculating distance from %v to %v", origin, target))
 
-		//fmt.Fprintln(os.Stderr, fmt.Sprintf("checking %v, found %t", current, m.grid[current]))
+	distance := 0
+	viewedPoints := map[point]bool{origin: true}
+	lastViewedPoints := map[point]bool{origin: true}
 
-		switch obj := m.grid[current]; obj.(type) {
-		case pellet:
-			if obj.(pellet).lastUpdated != m.currentTurn {
-				m.grid[current] = floor{}
+	for len(lastViewedPoints) > 0 {
+		distance++
+		currentViewedPoints := make(map[point]bool)
+
+		for lastPoint := range lastViewedPoints {
+			for _, point := range m.getVisiblePoints(lastPoint, 1) {
+				if point == target {
+					fmt.Fprintln(os.Stderr, fmt.Sprintf("distance is %v", distance))
+					return distance
+				}
+
+				if _, ok := viewedPoints[point]; !ok {
+					viewedPoints[point] = true
+					currentViewedPoints[point] = true
+				}
 			}
-		case wall:
-			return
+		}
+
+		if printDebug {
+			fmt.Fprintln(os.Stderr, fmt.Sprintf("distance = %v, last points are %v", distance, currentViewedPoints))
+		}
+
+		lastViewedPoints = currentViewedPoints
+	}
+
+	panic("If we got here there's no path and that shouldn't be possible")
+}
+
+func (m *gameMap) getVisiblePoints(origin point, viewDistance int) []point {
+	visiblePoints := make([]point, 0, 4*viewDistance)
+
+	for _, direction := range compass {
+		current := point{origin.x, origin.y}
+		distanceTravelled := 0
+
+		for distanceTravelled < viewDistance {
+			current = current.add(direction, m.width, m.height)
+
+			//fmt.Fprintln(os.Stderr, fmt.Sprintf("current view point = %v", current))
+
+			switch m.grid[current].(type) {
+			case wall:
+				distanceTravelled = viewDistance
+			default:
+				visiblePoints = append(visiblePoints, current)
+				distanceTravelled++
+			}
 		}
 	}
+
+	return visiblePoints
 }
 
 func (m *gameMap) getObjValue(obj interface{}) int {
@@ -351,6 +412,8 @@ func main() {
 
 		gameMap.update()
 
+		gameMap.pathDistance(point{20, 7}, point{21, 9})
+
 		fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: making commands", time.Since(start)))
 
 		var commands = make([]string, 0, visiblePacCount)
@@ -391,7 +454,7 @@ func getNextTarget(pac pac, gameMap gameMap) point {
 
 		for _, childCluster := range bestCluster.children {
 			value := float64(childCluster.value)
-			distance := float64(distance(pac.position, childCluster.position))
+			distance := float64(gameMap.pathDistance(pac.position, childCluster.position))
 
 			if distance == 0 && childCluster.size == 1 {
 				value = 0
@@ -418,7 +481,7 @@ func getNextTarget(pac pac, gameMap gameMap) point {
 	return bestCluster.position
 }
 
-func distance(p1 point, p2 point) int {
+func manhattanDistance(p1 point, p2 point) int {
 	return abs(p1.x-p2.x) + abs(p1.y-p2.y)
 }
 
@@ -436,6 +499,13 @@ func mod(x int, y int) int {
 		val += y
 	}
 	return val
+}
+
+func max(x int, y int) int {
+	if x > y {
+		return x
+	}
+	return y
 }
 
 func match(pac1 pac, pac2 pac) bool {
