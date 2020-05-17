@@ -10,8 +10,9 @@ import (
 
 var debug = 1
 
-const myPacValue = -5
-const enemyPacValue = -5
+const myPacValue = float64(-1)
+const enemyPacValue = float64(-1)
+const panicTime = 48 * time.Millisecond
 
 var compass = map[rune]point{
 	'N': point{0, -1},
@@ -57,7 +58,7 @@ type valueCluster struct {
 	parent   *valueCluster
 }
 
-func (v *valueCluster) addValue(value int) {
+func (v *valueCluster) addValue(value float64) {
 	// if v.parent == nil {
 	// 	fmt.Fprintln(os.Stderr, fmt.Sprintf("adding %v to %v with parent nil and size %v", value, v.position, v.size))
 	// } else {
@@ -86,9 +87,7 @@ func (v *valueCluster) contains(point point) bool {
 }
 
 func (m *gameMap) initialiseValueClusters() {
-	start := time.Now()
-
-	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: initialising base clusters", time.Since(start)))
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: initialising base clusters", time.Since(m.turnStart)))
 
 	m.valueGrid = make(map[point]*valueCluster)
 	for x := 0; x < m.width; x++ {
@@ -102,7 +101,7 @@ func (m *gameMap) initialiseValueClusters() {
 		}
 	}
 
-	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: clustering base clusters", time.Since(start)))
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: clustering base clusters", time.Since(m.turnStart)))
 
 	previousClusters := make(map[*valueCluster]bool)
 	for _, cluster := range m.valueGrid {
@@ -208,6 +207,7 @@ func (m *gameMap) getCombinedEdges(clusters map[*valueCluster]bool) map[point]bo
 }
 
 type gameMap struct {
+	turnStart     time.Time
 	currentTurn   int
 	width, height int
 	myPacs        map[int]pac
@@ -245,9 +245,7 @@ func (m *gameMap) add(position point, obj interface{}) {
 }
 
 func (m *gameMap) update() {
-	start := time.Now()
-
-	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updating visible pelets", time.Since(start)))
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updating visible pelets", time.Since(m.turnStart)))
 
 	visiblePoints := make(map[point]bool)
 	for _, pac := range m.myPacs {
@@ -265,7 +263,7 @@ func (m *gameMap) update() {
 		}
 	}
 
-	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updating super pellets", time.Since(start)))
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updating super pellets", time.Since(m.turnStart)))
 
 	for position, superPellet := range m.superPellets {
 		if superPellet.lastUpdated != m.currentTurn {
@@ -274,7 +272,7 @@ func (m *gameMap) update() {
 		}
 	}
 
-	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updating pacs", time.Since(start)))
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updating pacs", time.Since(m.turnStart)))
 
 	for _, pac := range m.myPacs {
 		if pac.lastUpdated != m.currentTurn {
@@ -283,7 +281,7 @@ func (m *gameMap) update() {
 		}
 	}
 
-	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updating values", time.Since(start)))
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updating values", time.Since(m.turnStart)))
 
 	for position, cluster := range m.valueGrid {
 		difference := m.getObjValue(m.grid[position]) - cluster.value
@@ -374,19 +372,19 @@ func (m *gameMap) getVisiblePoints(origin point, viewDistance int) []point {
 	return visiblePoints
 }
 
-func (m *gameMap) getObjValue(obj interface{}) int {
+func (m *gameMap) getObjValue(obj interface{}) float64 {
 	switch obj.(type) {
 	case pac:
 		pac := obj.(pac)
-		//age := m.currentTurn - pac.lastUpdated + 1
+		age := float64(m.currentTurn - pac.lastUpdated + 1)
 		if pac.mine {
-			return myPacValue // / age
+			return myPacValue / age
 		}
-		return enemyPacValue // / age
+		return enemyPacValue / age
 	case pellet:
 		pellet := obj.(pellet)
-		//age := m.currentTurn - pellet.lastUpdated + 1
-		return pellet.value /// age
+		age := float64(m.currentTurn - pellet.lastUpdated + 1)
+		return float64(pellet.value) / age
 	default:
 		return 0
 	}
@@ -409,8 +407,6 @@ func getCentre(points map[point]*valueCluster) point {
 }
 
 func main() {
-	start := time.Now()
-
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 1000000), 1000000)
 
@@ -420,9 +416,9 @@ func main() {
 	scanner.Scan()
 	fmt.Sscan(scanner.Text(), &width, &height)
 
-	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: making game map", time.Since(start)))
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("making game map"))
 
-	gameMap := gameMap{0, width, height, make(map[int]pac), make(map[int]pac), make(map[point]pellet), make(map[point]interface{}), nil, nil}
+	gameMap := gameMap{time.Now(), 0, width, height, make(map[int]pac), make(map[int]pac), make(map[point]pellet), make(map[point]interface{}), nil, nil}
 
 	for i := 0; i < height; i++ {
 		scanner.Scan()
@@ -439,15 +435,13 @@ func main() {
 		}
 	}
 
-	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: initialising value clusters", time.Since(start)))
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: initialising value clusters", time.Since(gameMap.turnStart)))
 
 	gameMap.initialiseValueClusters()
 
-	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: starting game", time.Since(start)))
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: starting game", time.Since(gameMap.turnStart)))
 
 	for {
-		gameMap.currentTurn++
-
 		var myScore, opponentScore int
 		scanner.Scan()
 		fmt.Sscan(scanner.Text(), &myScore, &opponentScore)
@@ -456,7 +450,10 @@ func main() {
 		scanner.Scan()
 		fmt.Sscan(scanner.Text(), &visiblePacCount)
 
-		fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updating pacs", time.Since(start)))
+		gameMap.turnStart = time.Now()
+		gameMap.currentTurn++
+
+		fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updating pacs", time.Since(gameMap.turnStart)))
 
 		for i := 0; i < visiblePacCount; i++ {
 			var pacID int
@@ -474,7 +471,7 @@ func main() {
 			gameMap.add(position, newPac)
 		}
 
-		fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updating pellets", time.Since(start)))
+		fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updating pellets", time.Since(gameMap.turnStart)))
 
 		var visiblePelletCount int
 		scanner.Scan()
@@ -488,18 +485,21 @@ func main() {
 			gameMap.add(point{x, y}, pellet{value, gameMap.currentTurn})
 		}
 
-		fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updating game map", time.Since(start)))
+		fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updating game map", time.Since(gameMap.turnStart)))
 
 		gameMap.update()
 
 		gameMap.pathDistance(point{20, 7}, point{21, 9})
 
-		fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: making commands", time.Since(start)))
+		fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: making commands", time.Since(gameMap.turnStart)))
 
 		var commands = make([]string, 0, visiblePacCount)
 		for _, pac := range gameMap.myPacs {
 			commands = append(commands, chooseAction(pac, gameMap))
 		}
+
+		fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: printing commands", time.Since(gameMap.turnStart)))
+
 		fmt.Println(strings.Join(commands, "|"))
 	}
 }
@@ -527,12 +527,18 @@ func getNextTarget(pac pac, gameMap gameMap) point {
 
 	// temporarily remove this pac so it won't run away from itself
 	gameMap.valueGrid[pac.position].addValue(-myPacValue)
+	defer gameMap.valueGrid[pac.position].addValue(myPacValue)
 
 	fmt.Fprintln(os.Stderr, fmt.Sprintf("pacID = %v, position = %v", pac.pacID, pac.position))
 
 	for len(bestCluster.children) != 0 {
-		bestValue := float64(0)
+		// short circuit if we're low on time. It's easier than optimisation
+		if turnTime := time.Since(gameMap.turnStart); turnTime > panicTime {
+			fmt.Fprintln(os.Stderr, fmt.Sprintf("time to panic. At %v, cutoff %v", turnTime.Milliseconds(), panicTime.Milliseconds()))
+			return pac.position
+		}
 
+		bestValue := float64(0)
 		for childCluster := range bestCluster.children {
 
 			var nearestPoint point
@@ -551,7 +557,7 @@ func getNextTarget(pac pac, gameMap gameMap) point {
 				}
 			}
 
-			value := float64(childCluster.value) / float64(childCluster.size)
+			value := childCluster.value / float64(childCluster.size)
 			if distance == 0 && childCluster.size == 1 {
 				value = 0
 			} else if distance != 0 {
@@ -573,9 +579,6 @@ func getNextTarget(pac pac, gameMap gameMap) point {
 		fmt.Fprintln(os.Stderr, fmt.Sprintf("best cluster: nearestPoint = %v, value = %v, size = %v, edges = %v",
 			target, bestCluster.value, bestCluster.size, bestCluster.edges))
 	}
-
-	// put the pac back in the grid
-	gameMap.valueGrid[pac.position].addValue(myPacValue)
 
 	return target
 }
