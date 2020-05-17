@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+var debug = 1
+
 const myPacValue = -5
 const enemyPacValue = -5
 
@@ -48,10 +50,10 @@ type pellet struct {
 }
 
 type valueCluster struct {
-	position point
-	value    int
+	edges    map[point]bool
+	value    float64
 	size     int
-	children []*valueCluster
+	children map[*valueCluster]bool
 	parent   *valueCluster
 }
 
@@ -67,74 +69,142 @@ func (v *valueCluster) addValue(value int) {
 	}
 }
 
-func (v *valueCluster) addChildClusters(baseValues map[point]*valueCluster) {
-	if v.size == 1 {
-		return
-	}
-
-	quadrants := make([]map[point]*valueCluster, 0, 4)
-
-	for i := 0; i < 4; i++ {
-		quadrants = append(quadrants, make(map[point]*valueCluster))
-	}
-
-	centre := v.position
-
-	for position, value := range baseValues {
-		var quadrant int
-
-		if position.x <= centre.x && position.y <= centre.y {
-			quadrant = 0
-		} else if position.x <= centre.x && position.y > centre.y {
-			quadrant = 1
-		} else if position.x > centre.x && position.y <= centre.y {
-			quadrant = 2
-		} else {
-			quadrant = 3
+func (v *valueCluster) contains(point point) bool {
+	for edge := range v.edges {
+		if edge == point {
+			return true
 		}
-
-		quadrants[quadrant][position] = value
 	}
 
-	for _, quadrant := range quadrants {
-		if len(quadrant) == 0 {
-			continue
+	for child := range v.children {
+		if child.contains(point) {
+			return true
 		}
+	}
 
-		var child *valueCluster
+	return false
+}
 
-		if len(quadrant) == 1 {
-			for _, cluster := range quadrant {
-				child = cluster
-				child.parent = v
+func (m *gameMap) initialiseValueClusters() {
+	start := time.Now()
+
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: initialising base clusters", time.Since(start)))
+
+	m.valueGrid = make(map[point]*valueCluster)
+	for x := 0; x < m.width; x++ {
+		for y := 0; y < m.height; y++ {
+			position := point{x, y}
+			switch obj := m.grid[position]; obj.(type) {
+			case wall:
+			default:
+				m.valueGrid[position] = &valueCluster{map[point]bool{position: true}, 0, 1, nil, nil}
 			}
-		} else {
-			child = &valueCluster{getCentre(quadrant), 0, len(quadrant), make([]*valueCluster, 0, 4), v}
+		}
+	}
+
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: clustering base clusters", time.Since(start)))
+
+	previousClusters := make(map[*valueCluster]bool)
+	for _, cluster := range m.valueGrid {
+		previousClusters[cluster] = true
+	}
+
+	for len(previousClusters) > 1 {
+		newClusters := make(map[*valueCluster]bool)
+		groupedClusters := make(map[*valueCluster]bool)
+		for cluster := range previousClusters {
+			if _, grouped := groupedClusters[cluster]; !grouped {
+				clusterNeighbourhood := m.getClusterNeighbourhood(cluster, previousClusters, groupedClusters)
+				combinedEdges := m.getCombinedEdges(clusterNeighbourhood)
+
+				newCluster := &valueCluster{combinedEdges, 0, 0, clusterNeighbourhood, nil}
+
+				combinedSize := 0
+				for neighbour := range clusterNeighbourhood {
+					combinedSize += neighbour.size
+					groupedClusters[neighbour] = true
+					neighbour.parent = newCluster
+				}
+
+				newCluster.size = combinedSize
+				newClusters[newCluster] = true
+			}
 		}
 
-		v.children = append(v.children, child)
-		child.addChildClusters(quadrant)
+		previousClusters = newClusters
+	}
+
+	for cluster := range previousClusters {
+		m.topCluster = cluster
 	}
 }
 
-func makeGameMap(width int, height int) gameMap {
-	valueMap := make(map[point]*valueCluster)
-	for x := 0; x < width; x++ {
-		for y := 0; y < height; y++ {
-			position := point{x, y}
-			valueMap[position] = &valueCluster{position, 0, 1, nil, nil}
+func (m *gameMap) getClusterNeighbourhood(origin *valueCluster, clusters map[*valueCluster]bool, groupedClusters map[*valueCluster]bool) map[*valueCluster]bool {
+	adjacentPoints := make(map[point]bool)
+	for edge := range origin.edges {
+		for point := range m.getNeighbours(edge, 1) {
+			adjacentPoints[point] = true
 		}
 	}
 
-	topCluster := valueCluster{getCentre(valueMap), 0, len(valueMap), make([]*valueCluster, 0, 4), nil}
-	topCluster.addChildClusters(valueMap)
+	neighbourhood := map[*valueCluster]bool{origin: true}
+	for cluster := range clusters {
+		if _, grouped := groupedClusters[cluster]; grouped {
+			continue
+		}
 
-	//fmt.Fprintln(os.Stderr, fmt.Sprintf("child clusters: %v", topCluster.children))
-	//for _, cluster := range topCluster.children {
-	//	fmt.Fprintln(os.Stderr, fmt.Sprintf("pointer:%v, parent:%v", cluster, *cluster.parent))
-	//}
+		isAdjacent := false
+		for edge := range cluster.edges {
+			for point := range adjacentPoints {
+				if edge == point {
+					isAdjacent = true
+				}
+			}
+		}
 
-	return gameMap{0, width, height, make(map[int]pac), make(map[int]pac), make(map[point]pellet), make(map[point]interface{}), valueMap, topCluster}
+		if isAdjacent {
+			neighbourhood[cluster] = true
+		}
+	}
+
+	return neighbourhood
+}
+
+func (m *gameMap) getCombinedEdges(clusters map[*valueCluster]bool) map[point]bool {
+	combinedEdges := make(map[point]bool)
+	allEdges := make(map[point]int)
+
+	for cluster := range clusters {
+		for edge := range cluster.edges {
+			allEdges[edge]++
+		}
+	}
+
+	for edge, count := range allEdges {
+		// if it's on the edge of 4 it can't still be an edge
+		if count >= 4 {
+			continue
+		}
+
+		// if any of its neighbours isn't in any cluster it's still an edge
+		isRealEdge := false
+		for neighbour := range m.getNeighbours(edge, 1) {
+			neighbourIsInACluster := false
+			for cluster := range clusters {
+				if cluster.contains(neighbour) {
+					neighbourIsInACluster = true
+				}
+			}
+			if !neighbourIsInACluster {
+				isRealEdge = true
+			}
+		}
+		if isRealEdge {
+			combinedEdges[edge] = true
+		}
+	}
+
+	return combinedEdges
 }
 
 type gameMap struct {
@@ -145,7 +215,7 @@ type gameMap struct {
 	superPellets  map[point]pellet
 	grid          map[point]interface{}
 	valueGrid     map[point]*valueCluster
-	topCluster    valueCluster
+	topCluster    *valueCluster
 }
 
 func (m *gameMap) add(position point, obj interface{}) {
@@ -215,29 +285,18 @@ func (m *gameMap) update() {
 
 	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updating values", time.Since(start)))
 
-	for point, obj := range m.grid {
-		valueCluster := m.valueGrid[point]
-		difference := m.getObjValue(obj) - valueCluster.value
+	for position, cluster := range m.valueGrid {
+		difference := m.getObjValue(m.grid[position]) - cluster.value
 		if difference != 0 {
-			valueCluster.addValue(difference)
+			cluster.addValue(difference)
 		}
 	}
-
-	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updated values", time.Since(start)))
 }
 
 func (m *gameMap) pathDistance(origin point, target point) int {
 	if origin == target {
 		return 0
 	}
-
-	printDebug := false
-	point1 := point{21, 7}
-	point2 := point{22, 9}
-	if origin == point1 && target == point2 {
-		printDebug = true
-	}
-	fmt.Fprintln(os.Stderr, fmt.Sprintf("calculating distance from %v to %v", origin, target))
 
 	distance := 0
 	viewedPoints := map[point]bool{origin: true}
@@ -250,7 +309,6 @@ func (m *gameMap) pathDistance(origin point, target point) int {
 		for lastPoint := range lastViewedPoints {
 			for _, point := range m.getVisiblePoints(lastPoint, 1) {
 				if point == target {
-					fmt.Fprintln(os.Stderr, fmt.Sprintf("distance is %v", distance))
 					return distance
 				}
 
@@ -261,14 +319,34 @@ func (m *gameMap) pathDistance(origin point, target point) int {
 			}
 		}
 
-		if printDebug {
-			fmt.Fprintln(os.Stderr, fmt.Sprintf("distance = %v, last points are %v", distance, currentViewedPoints))
+		lastViewedPoints = currentViewedPoints
+	}
+
+	panic("If we got here there's no path and that shouldn't be possible")
+}
+
+func (m *gameMap) getNeighbours(origin point, maxDistance int) map[point]int {
+	distance := 0
+	neighbours := make(map[point]int)
+	lastViewedPoints := map[point]bool{origin: true}
+
+	for distance < maxDistance {
+		distance++
+		currentViewedPoints := make(map[point]bool)
+
+		for lastPoint := range lastViewedPoints {
+			for _, point := range m.getVisiblePoints(lastPoint, 1) {
+				if _, ok := neighbours[point]; !ok {
+					neighbours[point] = distance
+					currentViewedPoints[point] = true
+				}
+			}
 		}
 
 		lastViewedPoints = currentViewedPoints
 	}
 
-	panic("If we got here there's no path and that shouldn't be possible")
+	return neighbours
 }
 
 func (m *gameMap) getVisiblePoints(origin point, viewDistance int) []point {
@@ -344,9 +422,7 @@ func main() {
 
 	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: making game map", time.Since(start)))
 
-	var gameMap = makeGameMap(width, height)
-
-	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: populating game map", time.Since(start)))
+	gameMap := gameMap{0, width, height, make(map[int]pac), make(map[int]pac), make(map[point]pellet), make(map[point]interface{}), nil, nil}
 
 	for i := 0; i < height; i++ {
 		scanner.Scan()
@@ -362,6 +438,10 @@ func main() {
 			}
 		}
 	}
+
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: initialising value clusters", time.Since(start)))
+
+	gameMap.initialiseValueClusters()
 
 	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: starting game", time.Since(start)))
 
@@ -443,6 +523,7 @@ func chooseAction(pac pac, gameMap gameMap) string {
 
 func getNextTarget(pac pac, gameMap gameMap) point {
 	bestCluster := gameMap.topCluster
+	var target point
 
 	// temporarily remove this pac so it won't run away from itself
 	gameMap.valueGrid[pac.position].addValue(-myPacValue)
@@ -452,33 +533,51 @@ func getNextTarget(pac pac, gameMap gameMap) point {
 	for len(bestCluster.children) != 0 {
 		bestValue := float64(0)
 
-		for _, childCluster := range bestCluster.children {
-			value := float64(childCluster.value)
-			distance := float64(gameMap.pathDistance(pac.position, childCluster.position))
+		for childCluster := range bestCluster.children {
 
+			var nearestPoint point
+			distance := 999999
+
+			if childCluster.contains(pac.position) {
+				distance = 0
+				nearestPoint = pac.position
+			} else {
+				for edge := range childCluster.edges {
+					edgeDistance := gameMap.pathDistance(pac.position, edge)
+					if edgeDistance < distance {
+						distance = edgeDistance
+						nearestPoint = edge
+					}
+				}
+			}
+
+			value := float64(childCluster.value) / float64(childCluster.size)
 			if distance == 0 && childCluster.size == 1 {
 				value = 0
 			} else if distance != 0 {
-				value /= distance
+				value /= float64(distance)
 			}
 
 			if pac.pacID == 0 {
-				fmt.Fprintln(os.Stderr, fmt.Sprintf("considering: position = %v, value = %v, size = %v, distance = %v, calcValue = %v",
-					childCluster.position, childCluster.value, childCluster.size, distance, value))
+				fmt.Fprintln(os.Stderr, fmt.Sprintf("considering: nearestPoint = %v, value = %v, size = %v, distance = %v, calcValue = %v, edges = %v",
+					nearestPoint, childCluster.value, childCluster.size, distance, value, childCluster.edges))
 			}
 
 			if value >= bestValue {
 				bestValue = value
-				bestCluster = *childCluster
+				bestCluster = childCluster
+				target = nearestPoint
 			}
 		}
-		fmt.Fprintln(os.Stderr, fmt.Sprintf("best cluster: position = %v, value = %v, size = %v", bestCluster.position, bestCluster.value, bestCluster.size))
+
+		fmt.Fprintln(os.Stderr, fmt.Sprintf("best cluster: nearestPoint = %v, value = %v, size = %v, edges = %v",
+			target, bestCluster.value, bestCluster.size, bestCluster.edges))
 	}
 
 	// put the pac back in the grid
 	gameMap.valueGrid[pac.position].addValue(myPacValue)
 
-	return bestCluster.position
+	return target
 }
 
 func manhattanDistance(p1 point, p2 point) int {
