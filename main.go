@@ -8,11 +8,13 @@ import (
 	"time"
 )
 
-var debug = 1
-
 const myPacValue = float64(-1)
 const enemyPacValue = float64(-1)
+const pelletValue = float64(1)
+const superPelletValue = float64(10)
 const panicTime = 48 * time.Millisecond
+const clusterNeighbourDistance = 1
+const engageGhostsYoungerThan = 2
 
 var compass = map[rune]point{
 	'N': point{0, -1},
@@ -42,7 +44,22 @@ type pac struct {
 	typeID                          string
 	speedTurnsLeft, abilityCooldown int
 	position                        point
+	lastTarget                      point
 	lastUpdated                     int
+}
+
+func (p pac) fightResult(other pac) int {
+	if p.typeID == other.typeID {
+		return 0
+	}
+
+	if (p.typeID == "ROCK" && other.typeID == "SCISSORS") ||
+		(p.typeID == "SCISSORS" && other.typeID == "PAPER") ||
+		(p.typeID == "PAPER" && other.typeID == "ROCK") {
+		return 1
+	}
+
+	return -1
 }
 
 type pellet struct {
@@ -52,6 +69,7 @@ type pellet struct {
 
 type valueCluster struct {
 	edges    map[point]bool
+	rawValue float64
 	value    float64
 	size     int
 	children map[*valueCluster]bool
@@ -59,12 +77,8 @@ type valueCluster struct {
 }
 
 func (v *valueCluster) addValue(value float64) {
-	// if v.parent == nil {
-	// 	fmt.Fprintln(os.Stderr, fmt.Sprintf("adding %v to %v with parent nil and size %v", value, v.position, v.size))
-	// } else {
-	// 	fmt.Fprintln(os.Stderr, fmt.Sprintf("adding %v to %v with parent %v and size %v", value, v.position, v.parent.value, v.size))
-	// }
-	v.value += value
+	v.rawValue += value
+	v.value = (v.rawValue * v.rawValue) / float64(v.size)
 	if v.parent != nil {
 		v.parent.addValue(value)
 	}
@@ -96,7 +110,7 @@ func (m *gameMap) initialiseValueClusters() {
 			switch obj := m.grid[position]; obj.(type) {
 			case wall:
 			default:
-				m.valueGrid[position] = &valueCluster{map[point]bool{position: true}, 0, 1, nil, nil}
+				m.valueGrid[position] = &valueCluster{map[point]bool{position: true}, 0, 0, 1, nil, nil}
 			}
 		}
 	}
@@ -116,7 +130,7 @@ func (m *gameMap) initialiseValueClusters() {
 				clusterNeighbourhood := m.getClusterNeighbourhood(cluster, previousClusters, groupedClusters)
 				combinedEdges := m.getCombinedEdges(clusterNeighbourhood)
 
-				newCluster := &valueCluster{combinedEdges, 0, 0, clusterNeighbourhood, nil}
+				newCluster := &valueCluster{combinedEdges, 0, 0, 0, clusterNeighbourhood, nil}
 
 				combinedSize := 0
 				for neighbour := range clusterNeighbourhood {
@@ -141,7 +155,7 @@ func (m *gameMap) initialiseValueClusters() {
 func (m *gameMap) getClusterNeighbourhood(origin *valueCluster, clusters map[*valueCluster]bool, groupedClusters map[*valueCluster]bool) map[*valueCluster]bool {
 	adjacentPoints := make(map[point]bool)
 	for edge := range origin.edges {
-		for point := range m.getNeighbours(edge, 1) {
+		for point := range m.getNeighbours(edge, clusterNeighbourDistance) {
 			adjacentPoints[point] = true
 		}
 	}
@@ -211,7 +225,6 @@ type gameMap struct {
 	currentTurn   int
 	width, height int
 	myPacs        map[int]pac
-	enemyPacs     map[int]pac
 	superPellets  map[point]pellet
 	grid          map[point]interface{}
 	valueGrid     map[point]*valueCluster
@@ -227,9 +240,6 @@ func (m *gameMap) add(position point, obj interface{}) {
 		if newPac.mine {
 			oldPac = m.myPacs[pacID]
 			m.myPacs[pacID] = newPac
-		} else {
-			oldPac = m.enemyPacs[pacID]
-			m.enemyPacs[pacID] = newPac
 		}
 		m.grid[oldPac.position] = floor{}
 		m.grid[position] = newPac
@@ -245,7 +255,7 @@ func (m *gameMap) add(position point, obj interface{}) {
 }
 
 func (m *gameMap) update() {
-	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updating visible pelets", time.Since(m.turnStart)))
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updating visible pellets and enemies", time.Since(m.turnStart)))
 
 	visiblePoints := make(map[point]bool)
 	for _, pac := range m.myPacs {
@@ -260,6 +270,10 @@ func (m *gameMap) update() {
 			if obj.(pellet).lastUpdated != m.currentTurn {
 				m.add(point, floor{})
 			}
+		case pac:
+			if obj.(pac).lastUpdated != m.currentTurn {
+				m.add(point, floor{})
+			}
 		}
 	}
 
@@ -272,7 +286,7 @@ func (m *gameMap) update() {
 		}
 	}
 
-	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updating pacs", time.Since(m.turnStart)))
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updating my pacs", time.Since(m.turnStart)))
 
 	for _, pac := range m.myPacs {
 		if pac.lastUpdated != m.currentTurn {
@@ -284,7 +298,8 @@ func (m *gameMap) update() {
 	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: updating values", time.Since(m.turnStart)))
 
 	for position, cluster := range m.valueGrid {
-		difference := m.getObjValue(m.grid[position]) - cluster.value
+		difference := m.getObjValue(m.grid[position]) - cluster.rawValue
+
 		if difference != 0 {
 			cluster.addValue(difference)
 		}
@@ -292,8 +307,21 @@ func (m *gameMap) update() {
 }
 
 func (m *gameMap) pathDistance(origin point, target point) int {
-	if origin == target {
-		return 0
+	result := m.pathDistances(origin, map[point]bool{target: true})
+	for _, distance := range result {
+		return distance
+	}
+	panic("If we've got here something is horribly wrong")
+}
+
+func (m *gameMap) pathDistances(origin point, targets map[point]bool) map[point]int {
+	results := make(map[point]int)
+
+	if _, ok := targets[origin]; ok {
+		results[origin] = 0
+		if len(targets) == 1 {
+			return results
+		}
 	}
 
 	distance := 0
@@ -306,14 +334,17 @@ func (m *gameMap) pathDistance(origin point, target point) int {
 
 		for lastPoint := range lastViewedPoints {
 			for _, point := range m.getVisiblePoints(lastPoint, 1) {
-				if point == target {
-					return distance
-				}
-
-				if _, ok := viewedPoints[point]; !ok {
+				if _, isViewedPoint := viewedPoints[point]; !isViewedPoint {
+					if _, isTarget := targets[point]; isTarget {
+						results[point] = distance
+						if len(results) == len(targets) {
+							return results
+						}
+					}
 					viewedPoints[point] = true
 					currentViewedPoints[point] = true
 				}
+
 			}
 		}
 
@@ -325,7 +356,7 @@ func (m *gameMap) pathDistance(origin point, target point) int {
 
 func (m *gameMap) getNeighbours(origin point, maxDistance int) map[point]int {
 	distance := 0
-	neighbours := make(map[point]int)
+	neighbours := map[point]int{origin: 0}
 	lastViewedPoints := map[point]bool{origin: true}
 
 	for distance < maxDistance {
@@ -384,15 +415,18 @@ func (m *gameMap) getObjValue(obj interface{}) float64 {
 	case pellet:
 		pellet := obj.(pellet)
 		age := float64(m.currentTurn - pellet.lastUpdated + 1)
-		return float64(pellet.value) / age
+		if pellet.value == 1 {
+			return pelletValue / age
+		}
+		return superPelletValue / age
 	default:
 		return 0
 	}
 }
 
 /**
- * Grab the pellets as fast as you can!
- **/
+* Grab the pellets as fast as you can!
+**/
 
 func getCentre(points map[point]*valueCluster) point {
 	sumX := 0
@@ -418,7 +452,7 @@ func main() {
 
 	fmt.Fprintln(os.Stderr, fmt.Sprintf("making game map"))
 
-	gameMap := gameMap{time.Now(), 0, width, height, make(map[int]pac), make(map[int]pac), make(map[point]pellet), make(map[point]interface{}), nil, nil}
+	gameMap := gameMap{time.Now(), 0, width, height, make(map[int]pac), make(map[point]pellet), make(map[point]interface{}), nil, nil}
 
 	for i := 0; i < height; i++ {
 		scanner.Scan()
@@ -466,7 +500,7 @@ func main() {
 
 			mine := _mine != 0
 			position := point{x, y}
-			newPac := pac{pacID, mine, typeID, speedTurnsLeft, abilityCooldown, position, gameMap.currentTurn}
+			newPac := pac{pacID, mine, typeID, speedTurnsLeft, abilityCooldown, position, position, gameMap.currentTurn}
 
 			gameMap.add(position, newPac)
 		}
@@ -504,21 +538,83 @@ func main() {
 	}
 }
 
-func chooseAction(pac pac, gameMap gameMap) string {
+func chooseAction(myPac pac, gameMap gameMap) string {
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: calculating action for pac %v", time.Since(gameMap.turnStart), myPac.pacID))
+
 	// sprint if possible
-	if pac.abilityCooldown <= 1 {
-		return fmt.Sprintf("SPEED %v", pac.pacID)
+	if myPac.abilityCooldown == 0 {
+		fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: speeding. speedTurnsLeft = %v, abilityCooldown = %v", time.Since(gameMap.turnStart), myPac.speedTurnsLeft, myPac.abilityCooldown))
+		return fmt.Sprintf("SPEED %v", myPac.pacID)
 	}
 
-	// if you see an enemy pac and you can eat it, give chase
+	// check for neighbours
+	for point := range gameMap.getNeighbours(myPac.position, 2) {
+		switch obj := gameMap.grid[point]; obj.(type) {
+		case pac:
+			neighbour := obj.(pac)
 
-	// if you see an enemy pac and you can change to eat it, change
+			fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: squaring up to %v", time.Since(gameMap.turnStart), neighbour))
 
-	// if you see an enemy pac and you can't eat it or change, run away
+			// run away from friendly pacs if they have priority
+			if neighbour.mine && myPac.pacID != neighbour.pacID {
+				escapeRoute := getEscapeRoute(gameMap, myPac.position, neighbour.position)
+				fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: pac %v running away from %v, going to %v", time.Since(gameMap.turnStart), myPac.pacID, neighbour.pacID, escapeRoute))
+				return fmt.Sprintf("MOVE %v %v %v", myPac.pacID, escapeRoute.x, escapeRoute.y)
+			}
+
+			if !neighbour.mine && gameMap.currentTurn-neighbour.lastUpdated < engageGhostsYoungerThan {
+				result := myPac.fightResult(neighbour)
+
+				// chase enemies if they look eatable
+				if result == 1 && myPac.speedTurnsLeft > neighbour.speedTurnsLeft {
+					fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: I am %v, he is %v. Attacking", time.Since(gameMap.turnStart), myPac.typeID, neighbour.typeID))
+					return fmt.Sprintf("MOVE %v %v %v", myPac.pacID, neighbour.position.x, neighbour.position.y)
+				}
+
+				// run away from enemies we can't eat
+				if result < 1 {
+					escapeRoute := getEscapeRoute(gameMap, myPac.position, neighbour.position)
+					fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: pac %v running away from %v, going to %v", myPac.typeID, time.Since(gameMap.turnStart), neighbour.pacID, escapeRoute))
+					return fmt.Sprintf("MOVE %v %v %v", myPac.pacID, escapeRoute.x, escapeRoute.y)
+				}
+			}
+		}
+	}
 
 	// run towards the highest value space
-	nextTarget := getNextTarget(pac, gameMap)
-	return fmt.Sprintf("MOVE %v %v %v", pac.pacID, nextTarget.x, nextTarget.y)
+	nextTarget := getNextTarget(myPac, gameMap)
+	myPac.lastTarget = nextTarget
+	return fmt.Sprintf("MOVE %v %v %v", myPac.pacID, nextTarget.x, nextTarget.y)
+}
+
+func getEscapeRoute(gameMap gameMap, prey point, predator point) point {
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: %v escaping from %v", time.Since(gameMap.turnStart), prey, predator))
+
+	movementOptions := gameMap.getNeighbours(prey, 2)
+
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: options are  %v", time.Since(gameMap.turnStart), movementOptions))
+
+	var predatorDistances map[point]int
+	movementOptionMap := make(map[point]bool)
+	for point := range movementOptions {
+		movementOptionMap[point] = true
+	}
+	predatorDistances = gameMap.pathDistances(predator, movementOptionMap)
+
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: predatorDistances are  %v", time.Since(gameMap.turnStart), predatorDistances))
+
+	var bestMovementOption point
+	bestDistance := 0
+	for point := range movementOptions {
+		if distance := predatorDistances[point]; distance >= bestDistance {
+			bestMovementOption = point
+			bestDistance = distance
+		}
+	}
+
+	fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: best option is %v with distance %v", time.Since(gameMap.turnStart), bestMovementOption, bestDistance))
+
+	return bestMovementOption
 }
 
 func getNextTarget(pac pac, gameMap gameMap) point {
@@ -529,27 +625,29 @@ func getNextTarget(pac pac, gameMap gameMap) point {
 	gameMap.valueGrid[pac.position].addValue(-myPacValue)
 	defer gameMap.valueGrid[pac.position].addValue(myPacValue)
 
-	fmt.Fprintln(os.Stderr, fmt.Sprintf("pacID = %v, position = %v", pac.pacID, pac.position))
+	// fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: position = %v, previousTarget = %v", time.Since(gameMap.turnStart), pac.position, pac.lastTarget))
 
 	for len(bestCluster.children) != 0 {
-		// short circuit if we're low on time. It's easier than optimisation
-		if turnTime := time.Since(gameMap.turnStart); turnTime > panicTime {
-			fmt.Fprintln(os.Stderr, fmt.Sprintf("time to panic. At %v, cutoff %v", turnTime.Milliseconds(), panicTime.Milliseconds()))
-			return pac.position
-		}
+		// fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: considering %v children", time.Since(gameMap.turnStart), len(bestCluster.children)))
 
-		bestValue := float64(0)
+		bestValue := float64(-99999)
 		for childCluster := range bestCluster.children {
+			// short circuit if we're low on time. It's easier than optimisation
+			if turnTime := time.Since(gameMap.turnStart); turnTime > panicTime {
+				fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: time to panic. Short circuiting pac %v", turnTime, pac.pacID))
+				return pac.lastTarget
+			}
 
 			var nearestPoint point
 			distance := 999999
+
+			//fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: finding nearest point for %v edges", time.Since(gameMap.turnStart), len(childCluster.edges)))
 
 			if childCluster.contains(pac.position) {
 				distance = 0
 				nearestPoint = pac.position
 			} else {
-				for edge := range childCluster.edges {
-					edgeDistance := gameMap.pathDistance(pac.position, edge)
+				for edge, edgeDistance := range gameMap.pathDistances(pac.position, childCluster.edges) {
 					if edgeDistance < distance {
 						distance = edgeDistance
 						nearestPoint = edge
@@ -557,17 +655,24 @@ func getNextTarget(pac pac, gameMap gameMap) point {
 				}
 			}
 
-			value := childCluster.value / float64(childCluster.size)
-			if distance == 0 && childCluster.size == 1 {
-				value = 0
+			//fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: calculating value", time.Since(gameMap.turnStart)))
+
+			value := childCluster.value
+
+			if childCluster.size == 1 {
+				if distance == 0 || (distance == 1 && pac.speedTurnsLeft != 0) {
+					value = 0
+				}
 			} else if distance != 0 {
 				value /= float64(distance)
 			}
 
-			if pac.pacID == 0 {
-				fmt.Fprintln(os.Stderr, fmt.Sprintf("considering: nearestPoint = %v, value = %v, size = %v, distance = %v, calcValue = %v, edges = %v",
-					nearestPoint, childCluster.value, childCluster.size, distance, value, childCluster.edges))
-			}
+			//if pac.pacID == 0 {
+			// fmt.Fprintln(os.Stderr, fmt.Sprintf("considering: nearestPoint = %v, value = %v, size = %v, distance = %v, calcValue = %v, edges = %v",
+			// 	nearestPoint, childCluster.value, childCluster.size, distance, value, childCluster.edges))
+			// }
+
+			//fmt.Fprintln(os.Stderr, fmt.Sprintf("%v: comparing result", time.Since(gameMap.turnStart)))
 
 			if value >= bestValue {
 				bestValue = value
@@ -576,8 +681,8 @@ func getNextTarget(pac pac, gameMap gameMap) point {
 			}
 		}
 
-		fmt.Fprintln(os.Stderr, fmt.Sprintf("best cluster: nearestPoint = %v, value = %v, size = %v, edges = %v",
-			target, bestCluster.value, bestCluster.size, bestCluster.edges))
+		// fmt.Fprintln(os.Stderr, fmt.Sprintf("best cluster: nearestPoint = %v, value = %v, rawValue = %v, size = %v, edges = %v",
+		// 	target, bestCluster.value, bestCluster.rawValue, bestCluster.size, bestCluster.edges))
 	}
 
 	return target
